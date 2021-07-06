@@ -684,11 +684,6 @@ func (d *Driver) Create() error {
 	d.debugf("Next ID is '%s'", id)
 	d.VMID = id
 
-	node, err := d.driver.ClusterNodeGet()
-	if err != nil {
-		return err
-	}
-
 	switch d.ProvisionStrategy {
 	case "cdrom":
 
@@ -702,7 +697,7 @@ func (d *Driver) Create() error {
 		}
 
 		d.debugf("Creating disk volume '%s' with size '%s'", volume.Filename, volume.Size)
-		diskname, err := d.driver.NodesNodeStorageStorageContentPost(node, d.Storage, &volume)
+		diskname, err := d.driver.NodesNodeStorageStorageContentPost(d.Node, d.Storage, &volume)
 		if err != nil {
 			return err
 		}
@@ -761,12 +756,12 @@ func (d *Driver) Create() error {
 			}
 		}
 		d.debugf("Creating VM '%s' with '%d' of memory", npp.VMID, npp.Memory)
-		taskid, err := d.driver.NodesNodeQemuPost(node, &npp)
+		taskid, err := d.driver.NodesNodeQemuPost(d.Node, &npp)
 		if err != nil {
 			return err
 		}
 
-		err = d.driver.WaitForTaskToComplete(node, taskid)
+		err = d.driver.WaitForTaskToComplete(d.Node, taskid)
 		if err != nil {
 			return err
 		}
@@ -774,12 +769,12 @@ func (d *Driver) Create() error {
 		if d.CiEnabled == "1" {
 			// specially handle setting sshkeys
 			// https://forum.proxmox.com/threads/how-to-use-pvesh-set-vms-sshkeys.52570/
-			taskid, err = d.driver.NodesNodeQemuVMIDConfigSetSSHKeys(node, d.VMID, key)
+			taskid, err = d.driver.NodesNodeQemuVMIDConfigSetSSHKeys(d.Node, d.VMID, key)
 			if err != nil {
 				return err
 			}
 
-			err = d.driver.WaitForTaskToComplete(node, taskid)
+			err = d.driver.WaitForTaskToComplete(d.Node, taskid)
 			if err != nil {
 				return err
 			}
@@ -812,12 +807,12 @@ func (d *Driver) Create() error {
 
 		d.debugf("cloning template id '%s' as vmid '%s'", d.CloneVMID, clone.Newid)
 
-		taskid, err := d.driver.NodesNodeQemuVMIDClonePost(node, d.CloneVMID, &clone)
+		taskid, err := d.driver.NodesNodeQemuVMIDClonePost(d.Node, d.CloneVMID, &clone)
 		if err != nil {
 			return err
 		}
 
-		err = d.driver.WaitForTaskToComplete(node, taskid)
+		err = d.driver.WaitForTaskToComplete(d.Node, taskid)
 		if err != nil {
 			return err
 		}
@@ -829,7 +824,7 @@ func (d *Driver) Create() error {
 		}
 		d.debugf("resizing disk '%s' on vmid '%s' to '%s'", resize.Disk, d.VMID, resize.Size)
 
-		err = d.driver.NodesNodeQemuVMIDResizePut(node, d.VMID, &resize)
+		err = d.driver.NodesNodeQemuVMIDResizePut(d.Node, d.VMID, &resize)
 		if err != nil {
 			return err
 		}
@@ -862,14 +857,14 @@ func (d *Driver) Create() error {
 			npp.CPU = d.CPU
 		}
 
-		taskid, err = d.driver.NodesNodeQemuVMIDConfigPost(node, d.VMID, &npp)
+		taskid, err = d.driver.NodesNodeQemuVMIDConfigPost(d.Node, d.VMID, &npp)
 		if err != nil {
 			return err
 		}
 
 		// append newly minted ssh key to existing (if any)
 		d.debugf("retrieving existing cloud-init sshkeys from vmid '%s'", d.VMID)
-		config, err := d.driver.GetConfig(node, d.CloneVMID)
+		config, err := d.driver.GetConfig(d.Node, d.CloneVMID)
 		if err != nil {
 			return err
 		}
@@ -891,12 +886,12 @@ func (d *Driver) Create() error {
 
 		// specially handle setting sshkeys
 		// https://forum.proxmox.com/threads/how-to-use-pvesh-set-vms-sshkeys.52570/
-		taskid, err = d.driver.NodesNodeQemuVMIDConfigSetSSHKeys(node, d.VMID, SSHKeys)
+		taskid, err = d.driver.NodesNodeQemuVMIDConfigSetSSHKeys(d.Node, d.VMID, SSHKeys)
 		if err != nil {
 			return err
 		}
 
-		err = d.driver.WaitForTaskToComplete(node, taskid)
+		err = d.driver.WaitForTaskToComplete(d.Node, taskid)
 		if err != nil {
 			return err
 		}
@@ -906,7 +901,7 @@ func (d *Driver) Create() error {
 	}
 
 	// Set the newly minted UUID
-	config, err := d.driver.GetConfig(node, d.VMID)
+	config, err := d.driver.GetConfig(d.Node, d.VMID)
 	if err != nil {
 		return err
 	}
@@ -930,7 +925,7 @@ func (d *Driver) Create() error {
 	}
 
 	// wait for network to come up
-	err = d.waitForNetwork(node, d.VMID)
+	err = d.waitForNetwork(d.Node, d.VMID)
 
 	// set the IPAddress
 	_, err = d.GetIP()
