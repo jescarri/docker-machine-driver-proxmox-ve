@@ -364,6 +364,8 @@ type NodesNodeQemuPostParameter struct {
 	Autostart  string // optional, Automatic restart after crash (currently ignored).
 	Agent      string // optional, Enable/disable Qemu GuestAgent.
 	Net0       string
+	Net1       string
+	Net2       string
 	Name       string // optional, Set a name for the VM. Only used on the configuration web interface.
 	SCSI0      string // optional, Use volume as VIRTIO hard disk (n is 0 to 15).
 	Ostype     string // optional, Specify guest operating system.

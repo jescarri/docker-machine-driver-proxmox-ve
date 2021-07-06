@@ -749,6 +749,8 @@ func (d *Driver) Create() error {
 		}
 
 		npp.Net0, _ = d.generateNetString()
+		npp.Net1 = "model=virtio,bridge=vmbr1"
+		npp.Net2 = "model=virtio,bridge=vmbr2"
 
 		if d.StorageType == "qcow2" {
 			npp.SCSI0 = d.Storage + ":" + d.VMID + "/" + volume.Filename
@@ -850,6 +852,8 @@ func (d *Driver) Create() error {
 
 		if len(d.NetBridge) > 0 {
 			npp.Net0, _ = d.generateNetString()
+			npp.Net1 = "model=virtio,bridge=vmbr1"
+			npp.Net2 = "model=virtio,bridge=vmbr2"
 		}
 
 		if len(d.NUMA) > 0 {
