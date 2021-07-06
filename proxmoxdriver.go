@@ -635,11 +635,9 @@ func (d *Driver) Create() error {
 	// add some random wait time here to help with race conditions in the proxmox api
 	// the app could be getting invoked several times in rapid succession so some small waits may be helpful
 	mrand.Seed(time.Now().UnixNano()) // Seed the random number generator using the current time (nanoseconds since epoch)
-	min := 5
-	max := 15
-	r := mrand.Intn(max - min + 1) + min
-	d.debugf("sleeping %d seconds before retrieving next ID", r)
-	time.Sleep(time.Duration(r) * time.Second)
+	r := mrand.Intn(5000)
+	d.debugf("sleeping %d milliseconds before retrieving next ID", r)
+	time.Sleep(time.Duration(r) * time.Millisecond)
 
 	// get next available VMID
 	// NOTE: we want to lock in the ID as quickly as possible after retrieving (ie: invoke QemuPost or Clone ASAP to avoid race conditions with other instances)
@@ -922,8 +920,8 @@ func (d *Driver) Create() error {
 	}
 
 	// let VM start a settle a little
-	d.debugf("waiting for VM to start, wait 15 seconds")
-	time.Sleep(15 * time.Second)
+	d.debugf("waiting for VM to start, wait 10 seconds")
+	time.Sleep(10 * time.Second)
 
 	// wait for qemu-guest-agent
 	err = d.waitForQemuGuestAgent()
@@ -959,7 +957,7 @@ func (d *Driver) waitForQemuGuestAgent() error {
 	d.connectAPI()
 	for !d.ping() {
 		d.debugf("waiting for VM qemu-guest-agent to start")
-		time.Sleep(10 * time.Second)
+		time.Sleep(5 * time.Second)
 	}
 
 	return nil
@@ -977,14 +975,14 @@ func (d *Driver) waitForNetwork(node string, vmid string) error {
 		ip, err = d.driver.GetEth0IPv4(node, vmid)
 		if err != nil {
 			d.debugf("waiting for VM network to start")
-			time.Sleep(10 * time.Second)
+			time.Sleep(5 * time.Second)
 		} else {
 			if len(ip) > 0 {
 				up = true
 				d.debugf("VM network started with ip: %s", ip)
 			} else {
 				d.debugf("waiting for VM network to start")
-				time.Sleep(10 * time.Second)
+				time.Sleep(5 * time.Second)
 			}
 		}
 	}

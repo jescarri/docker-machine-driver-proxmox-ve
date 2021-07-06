@@ -836,8 +836,8 @@ func (p ProxmoxVE) WaitForTaskToComplete(node string, taskid string) error {
 			log.Infof("exiting with %s", tsr.Exitstatus)
 			return nil
 		}
-		log.Info("still running, waiting 1s")
-		time.Sleep(time.Second)
+		log.Info("still running, waiting 500ms")
+		time.Sleep(500 * time.Millisecond)
 	}
 	// unreachable code
 	return nil
