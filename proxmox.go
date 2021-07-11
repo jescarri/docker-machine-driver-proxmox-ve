@@ -309,6 +309,8 @@ type NodesNodeQemuPostParameter struct {
 	Autostart  string // optional, Automatic restart after crash (currently ignored).
 	Agent      string // optional, Enable/disable Qemu GuestAgent.
 	Net0       string
+	Net1       string
+	Net2       string
 	Name       string // optional, Set a name for the VM. Only used on the configuration web interface.
 	SCSI0      string // optional, Use volume as VIRTIO hard disk (n is 0 to 15).
 	Ostype     string // optional, Specify guest operating system.
@@ -412,6 +414,7 @@ type NodesNodeQemuVMIDClonePostParameter struct {
 	Full    string // Create a full copy of all disks.
 	Storage string // Target storage for full clone.
 	Format  string // Target format for file storage. Only valid for full clone.
+	Target  string
 }
 
 // NodesNodeQemuVMIDClonePost access the API
@@ -779,8 +782,7 @@ func (p ProxmoxVE) WaitForTaskToComplete(node string, taskid string) error {
 			log.Infof("exiting with %s", tsr.Exitstatus)
 			return nil
 		}
-		log.Info("still running, waiting 500ms")
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(10 * time.Second)
 	}
 	// unreachable code
 	return nil

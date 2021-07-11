@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	mrand "math/rand"
-	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -20,13 +19,12 @@ import (
 	"golang.org/x/crypto/ssh"
 	resty "gopkg.in/resty.v1"
 
-	sshrw "github.com/mosolovsa/go_cat_sshfilerw"
-
 	"github.com/docker/machine/libmachine/drivers"
 	"github.com/docker/machine/libmachine/mcnflag"
 	mssh "github.com/docker/machine/libmachine/ssh"
 	"github.com/docker/machine/libmachine/state"
 	"github.com/labstack/gommon/log"
+	"github.com/lnxbil/docker-machine-driver-proxmox-ve/pkg/dns"
 )
 
 // Driver for Proxmox VE
@@ -34,15 +32,13 @@ type Driver struct {
 	*drivers.BaseDriver
 	driver *ProxmoxVE
 
-	// Top-level strategy for proisioning a new node
-	ProvisionStrategy string
-
 	// Basic Authentication for Proxmox VE
-	Host     string // Host to connect to
-	Node     string // optional, node to create VM on, host used if omitted but must match internal node name
-	User     string // username
-	Password string // password
-	Realm    string // realm, e.g. pam, pve, etc.
+	Host         string // Host to connect to
+	Node         string // optional, node to create VM on, host used if omitted but must match internal node name
+	TemplateNode string // Node name that has the templates
+	User         string // username
+	Password     string // password
+	Realm        string // realm, e.g. pam, pve, etc.
 
 	// File to load as boot image RancherOS/Boot2Docker
 	ImageFile string // in the format <storagename>:iso/<filename>.iso
@@ -80,8 +76,11 @@ type Driver struct {
 	CPU           string // Emulated CPU type.
 	CPUSockets    string // The number of cpu sockets.
 	CPUCores      string // The number of cores per socket.
-	driverDebug   bool   // driver debugging
-	restyDebug    bool   // enable resty debugging
+
+	HostedZone  string
+	AWSRegion   string
+	driverDebug bool // driver debugging
+	restyDebug  bool // enable resty debugging
 }
 
 func (d *Driver) debugf(format string, v ...interface{}) {
@@ -130,11 +129,12 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Value:  "",
 		},
 		mcnflag.StringFlag{
-			EnvVar: "PROXMOXVE_PROVISION_STRATEGY",
-			Name:   "proxmoxve-provision-strategy",
-			Usage:  "Provision strategy (cdrom|clone)",
-			Value:  "cdrom",
+			EnvVar: "PROXMOXVE_PROXMOX_TEMPLATE_NODE",
+			Name:   "proxmoxve-proxmox-template-node",
+			Usage:  "Node that has the templates",
+			Value:  "",
 		},
+
 		mcnflag.StringFlag{
 			EnvVar: "PROXMOXVE_PROXMOX_USER_NAME",
 			Name:   "proxmoxve-proxmox-user-name",
@@ -325,6 +325,18 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Name:   "proxmoxve-debug-driver",
 			Usage:  "enables debugging in the driver",
 		},
+		mcnflag.StringFlag{
+			EnvVar: "R53_HOSTED_ZONE",
+			Name:   "r53-hosted-zone",
+			Usage:  "Route 53 Hosted Zone for DNS Records",
+			Value:  "",
+		},
+		mcnflag.StringFlag{
+			EnvVar: "AWS_REGION",
+			Name:   "aws-region",
+			Usage:  "AWS Region",
+			Value:  "",
+		},
 	}
 }
 
@@ -353,11 +365,10 @@ func (d *Driver) DriverName() string {
 func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.debug("SetConfigFromFlags called")
 
-	d.ProvisionStrategy = flags.String("proxmoxve-provision-strategy")
-
 	// PROXMOX API Connection settings
 	d.Host = flags.String("proxmoxve-proxmox-host")
 	d.Node = flags.String("proxmoxve-proxmox-node")
+	d.TemplateNode = flags.String("proxmoxve-proxmox-template-node")
 	if len(d.Node) == 0 {
 		d.Node = d.Host
 	}
@@ -410,6 +421,15 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 		resty.SetDebug(true)
 	}
 
+	//AWS R53 Config
+	d.HostedZone = flags.String("r53-hosted-zone")
+	d.AWSRegion = flags.String("aws-region")
+	if d.HostedZone == "" {
+		return fmt.Errorf("r53-hosted-zone flag or R53_HOSTED_ZONE env var are required")
+	}
+	if d.AWSRegion == "" {
+		return fmt.Errorf("aws-region flag or AWS_REGION env var are required")
+	}
 	return nil
 }
 
@@ -536,69 +556,6 @@ func (d *Driver) PreCreateCheck() error {
 	if err != nil {
 		return err
 	}
-
-	switch d.ProvisionStrategy {
-	case "cdrom":
-		// set defaults for cdrom
-		// replicating pre-clone behavior of setting a default on the parameter
-		if len(d.Storage) < 1 {
-			d.Storage = "local"
-		}
-
-		if len(d.StorageType) < 1 {
-			d.StorageType = "raw"
-		}
-
-		if len(d.NetBridge) < 1 {
-			d.NetBridge = "vmbr0"
-		}
-
-		if len(d.GuestUsername) < 1 {
-			d.GuestUsername = "docker"
-		}
-
-		if len(d.GuestPassword) < 1 {
-			d.GuestPassword = "tcuser"
-		}
-
-		// prepare StorageFilename
-		switch d.StorageType {
-		case "raw":
-			fallthrough
-		case "qcow2":
-			break
-		default:
-			return fmt.Errorf("storage type '%s' is not supported", d.StorageType)
-		}
-
-		storageType, err := d.driver.GetStorageType(d.Node, d.Storage)
-		if err != nil {
-			return err
-		}
-
-		filename := "-disk-0"
-		switch storageType {
-		case "lvmthin":
-			fallthrough
-		case "zfs":
-			fallthrough
-		case "ceph":
-			if d.StorageType != "raw" {
-				return fmt.Errorf("type '%s' on storage '%s' does only support raw", storageType, d.Storage)
-			}
-		case "nfs":
-			fallthrough
-		case "dir":
-			filename += "." + d.StorageType
-		}
-		// this is not the finale filename, it'll be constructed in Create()
-		d.StorageFilename = filename
-	case "clone":
-		break
-	default:
-		return fmt.Errorf("invalid provision strategy '%s'", d.ProvisionStrategy)
-	}
-
 	return nil
 }
 
@@ -606,7 +563,7 @@ func (d *Driver) PreCreateCheck() error {
 func (d *Driver) Create() error {
 
 	// create and save a new SSH key pair
-	d.debug("creating new ssh keypair")
+	log.Info("creating new ssh keypair")
 	key, err := d.createSSHKey()
 	if err != nil {
 		return err
@@ -669,216 +626,100 @@ func (d *Driver) Create() error {
 	d.debugf("Next ID is '%s'", id)
 	d.VMID = id
 
-	switch d.ProvisionStrategy {
-	case "cdrom":
+	clone := NodesNodeQemuVMIDClonePostParameter{
+		Newid:  d.VMID,
+		Name:   d.BaseDriver.MachineName,
+		Pool:   d.Pool,
+		Target: d.Node,
+	}
 
-		// prefixing StorageFilename with VMID
-		d.StorageFilename = "vm-" + d.VMID + d.StorageFilename
+	switch d.CloneFull {
+	case 0:
+		clone.Full = "0"
+		break
+	case 1:
+		clone.Full = "1"
+		clone.Format = d.StorageType
+		clone.Storage = d.Storage
+		break
+	case 2:
+		clone.Format = d.StorageType
+		clone.Storage = d.Storage
+		break
+	}
 
-		volume := NodesNodeStorageStorageContentPostParameter{
-			Filename: d.StorageFilename,
-			Size:     d.DiskSize + "G",
-			VMID:     d.VMID,
-		}
+	log.Infof("cloning template id '%s' as vmid '%s'", d.CloneVMID, clone.Newid)
 
-		d.debugf("Creating disk volume '%s' with size '%s'", volume.Filename, volume.Size)
-		diskname, err := d.driver.NodesNodeStorageStorageContentPost(d.Node, d.Storage, &volume)
-		if err != nil {
-			return err
-		}
+	taskid, err := d.driver.NodesNodeQemuVMIDClonePost(d.TemplateNode, d.CloneVMID, &clone)
+	if err != nil {
+		return err
+	}
 
-		if !strings.HasSuffix(diskname, d.StorageFilename) {
-			return fmt.Errorf("returned diskname is not correct: should be '%s' but was '%s'", d.StorageFilename, diskname)
-		}
+	err = d.driver.WaitForTaskToComplete(d.TemplateNode, taskid)
+	if err != nil {
+		return err
+	}
 
-		npp := NodesNodeQemuPostParameter{
-			VMID:       d.VMID,
-			Agent:      "1",
-			Autostart:  "1",
-			Onboot:     d.Onboot,
-			Memory:     d.Memory,
-			Sockets:    d.CPUSockets,
-			Cores:      d.CPUCores,
-			SCSI0:      d.StorageFilename,
-			Ostype:     "l26",
-			Name:       d.BaseDriver.MachineName,
-			KVM:        "1", // if you test in a nested environment, you may have to change this to 0 if you do not have nested virtualization
-			Scsihw:     d.ScsiController,
-			Cdrom:      d.ImageFile,
-			Pool:       d.Pool,
-			Protection: d.Protection,
-		}
+	// resize
+	resize := NodesNodeQemuVMIDResizePutParameter{
+		Disk: "scsi0",
+		Size: d.DiskSize + "G",
+	}
+	d.debugf("resizing disk '%s' on vmid '%s' to '%s'", resize.Disk, d.VMID, resize.Size)
 
-		if d.CiEnabled == "1" {
-			npp.Citype = d.Citype
-			npp.Ide3 = d.Storage + ":cloudinit"
-		}
+	err = d.driver.NodesNodeQemuVMIDResizePut(d.Node, d.VMID, &resize)
+	if err != nil {
+		return err
+	}
 
-		if len(d.ScsiAttributes) > 0 {
-			npp.SCSI0 += "," + d.ScsiAttributes
-		}
+	// set config values
+	d.debugf("setting VM config values for vmid '%s'", d.VMID)
+	npp := NodesNodeQemuPostParameter{
+		Agent:      "1",
+		Autostart:  "1",
+		Memory:     d.Memory,
+		Sockets:    d.CPUSockets,
+		Cores:      d.CPUCores,
+		KVM:        "1", // if you test in a nested environment, you may have to change this to 0 if you do not have nested virtualization,
+		Citype:     d.Citype,
+		Onboot:     d.Onboot,
+		Protection: d.Protection,
+	}
 
-		if len(d.NUMA) > 0 {
-			npp.NUMA = d.NUMA
-		}
-
-		if len(d.CPU) > 0 {
-			npp.CPU = d.CPU
-		}
-
+	if len(d.NetBridge) > 0 {
 		npp.Net0, _ = d.generateNetString()
+		npp.Net1 = "model=virtio,bridge=vmbr1"
+		npp.Net2 = "model=virtio,bridge=vmbr2"
+	}
 
-		if d.StorageType == "qcow2" {
-			npp.SCSI0 = d.Storage + ":" + d.VMID + "/" + volume.Filename
-		} else if d.StorageType == "raw" {
-			if strings.HasSuffix(volume.Filename, ".raw") {
-				// raw files (having .raw) should have the VMID in the path
-				npp.SCSI0 = d.Storage + ":" + d.VMID + "/" + volume.Filename
-			} else {
-				npp.SCSI0 = d.Storage + ":" + volume.Filename
-			}
-		}
-		d.debugf("Creating VM '%s' with '%d' of memory", npp.VMID, npp.Memory)
-		taskid, err := d.driver.NodesNodeQemuPost(d.Node, &npp)
-		if err != nil {
-			return err
-		}
+	if len(d.NUMA) > 0 {
+		npp.NUMA = d.NUMA
+	}
 
-		err = d.driver.WaitForTaskToComplete(d.Node, taskid)
-		if err != nil {
-			return err
-		}
+	if len(d.CPU) > 0 {
+		npp.CPU = d.CPU
+	}
 
-		if d.CiEnabled == "1" {
-			// specially handle setting sshkeys
-			// https://forum.proxmox.com/threads/how-to-use-pvesh-set-vms-sshkeys.52570/
-			taskid, err = d.driver.NodesNodeQemuVMIDConfigSetSSHKeys(d.Node, d.VMID, key)
-			if err != nil {
-				return err
-			}
+	taskid, err = d.driver.NodesNodeQemuVMIDConfigPost(d.Node, d.VMID, &npp)
+	if err != nil {
+		return err
+	}
 
-			err = d.driver.WaitForTaskToComplete(d.Node, taskid)
-			if err != nil {
-				return err
-			}
-		}
+	var SSHKeys string
 
-		break
-	case "clone":
+	SSHKeys += key
+	SSHKeys = strings.TrimSpace(SSHKeys)
 
-		// clone
-		clone := NodesNodeQemuVMIDClonePostParameter{
-			Newid: d.VMID,
-			Name:  d.BaseDriver.MachineName,
-			Pool:  d.Pool,
-		}
+	// specially handle setting sshkeys
+	// https://forum.proxmox.com/threads/how-to-use-pvesh-set-vms-sshkeys.52570/
+	taskid, err = d.driver.NodesNodeQemuVMIDConfigSetSSHKeys(d.Node, d.VMID, SSHKeys)
+	if err != nil {
+		return err
+	}
 
-		switch d.CloneFull {
-		case 0:
-			clone.Full = "0"
-			break
-		case 1:
-			clone.Full = "1"
-			clone.Format = d.StorageType
-			clone.Storage = d.Storage
-			break
-		case 2:
-			clone.Format = d.StorageType
-			clone.Storage = d.Storage
-			break
-		}
-
-		d.debugf("cloning template id '%s' as vmid '%s'", d.CloneVMID, clone.Newid)
-
-		taskid, err := d.driver.NodesNodeQemuVMIDClonePost(d.Node, d.CloneVMID, &clone)
-		if err != nil {
-			return err
-		}
-
-		err = d.driver.WaitForTaskToComplete(d.Node, taskid)
-		if err != nil {
-			return err
-		}
-
-		// resize
-		resize := NodesNodeQemuVMIDResizePutParameter{
-			Disk: "scsi0",
-			Size: d.DiskSize + "G",
-		}
-		d.debugf("resizing disk '%s' on vmid '%s' to '%s'", resize.Disk, d.VMID, resize.Size)
-
-		err = d.driver.NodesNodeQemuVMIDResizePut(d.Node, d.VMID, &resize)
-		if err != nil {
-			return err
-		}
-
-		// set config values
-		d.debugf("setting VM config values for vmid '%s'", d.VMID)
-		npp := NodesNodeQemuPostParameter{
-			Agent:      "1",
-			Autostart:  "1",
-			Memory:     d.Memory,
-			Sockets:    d.CPUSockets,
-			Cores:      d.CPUCores,
-			KVM:        "1", // if you test in a nested environment, you may have to change this to 0 if you do not have nested virtualization,
-			Citype:     d.Citype,
-			Onboot:     d.Onboot,
-			Protection: d.Protection,
-		}
-
-		if len(d.NetBridge) > 0 {
-			npp.Net0, _ = d.generateNetString()
-		}
-
-		if len(d.NUMA) > 0 {
-			npp.NUMA = d.NUMA
-		}
-
-		if len(d.CPU) > 0 {
-			npp.CPU = d.CPU
-		}
-
-		taskid, err = d.driver.NodesNodeQemuVMIDConfigPost(d.Node, d.VMID, &npp)
-		if err != nil {
-			return err
-		}
-
-		// append newly minted ssh key to existing (if any)
-		d.debugf("retrieving existing cloud-init sshkeys from vmid '%s'", d.VMID)
-		config, err := d.driver.GetConfig(d.Node, d.CloneVMID)
-		if err != nil {
-			return err
-		}
-
-		var SSHKeys string
-
-		if len(config.Data.SSHKeys) > 0 {
-			SSHKeys, err = url.QueryUnescape(config.Data.SSHKeys)
-			if err != nil {
-				return err
-			}
-
-			SSHKeys = strings.TrimSpace(SSHKeys)
-			SSHKeys += "\n"
-		}
-
-		SSHKeys += key
-		SSHKeys = strings.TrimSpace(SSHKeys)
-
-		// specially handle setting sshkeys
-		// https://forum.proxmox.com/threads/how-to-use-pvesh-set-vms-sshkeys.52570/
-		taskid, err = d.driver.NodesNodeQemuVMIDConfigSetSSHKeys(d.Node, d.VMID, SSHKeys)
-		if err != nil {
-			return err
-		}
-
-		err = d.driver.WaitForTaskToComplete(d.Node, taskid)
-		if err != nil {
-			return err
-		}
-		break
-	default:
-		return fmt.Errorf("invalid provision strategy '%s'", d.ProvisionStrategy)
+	err = d.driver.WaitForTaskToComplete(d.Node, taskid)
+	if err != nil {
+		return err
 	}
 
 	// Set the newly minted UUID
@@ -909,23 +750,21 @@ func (d *Driver) Create() error {
 	err = d.waitForNetwork()
 
 	// set the IPAddress
-	_, err = d.GetIP()
+	ip, err := d.GetIP()
 	if err != nil {
 		return err
 
 	}
-
-	switch d.ProvisionStrategy {
-	case "cdrom":
-		if len(d.GuestPassword) > 0 {
-			return d.prepareSSHWithPassword()
-		}
-		return nil
-	case "clone":
-		fallthrough
-	default:
-		return nil
+	log.Infof("Adding %s with ip: %s to Hosted Zone: %s in Region: %s", d.MachineName, ip, d.HostedZone, d.AWSRegion)
+	// CreateRecord(ipAddress string, hostname string, hostedZoneId string, ttl int64, weight int64, awsRegion string)
+	err = dns.CreateRecord(ip, d.MachineName, d.HostedZone, 60, 100, d.AWSRegion)
+	if err != nil {
+		log.Errorf("Can't add the machine to DNS: %s", err)
+		return err
 	}
+	log.Infof("Wait 60s to let provisioning finish")
+	time.Sleep(60 * time.Second)
+	return nil
 }
 
 func (d *Driver) waitForQemuGuestAgent() error {
@@ -933,7 +772,7 @@ func (d *Driver) waitForQemuGuestAgent() error {
 	d.connectAPI()
 	for !d.ping() {
 		d.debugf("waiting for VM qemu-guest-agent to start")
-		time.Sleep(5 * time.Second)
+		time.Sleep(10 * time.Second)
 	}
 
 	return nil
@@ -955,7 +794,8 @@ func (d *Driver) waitForNetwork() error {
 		} else {
 			if len(ip) > 0 {
 				up = true
-				d.debugf("VM network started with ip: %s", ip)
+				log.Infof("VM has IP %s, waiting 60s to let it finish booting", ip)
+				time.Sleep(60 * time.Second)
 			} else {
 				d.debugf("waiting for VM network to start")
 				time.Sleep(5 * time.Second)
@@ -981,59 +821,6 @@ func (d *Driver) generateNetString() (string, error) {
 	}
 
 	return net, nil
-}
-
-func (d *Driver) prepareSSHWithPassword() error {
-	sshConfig := &ssh.ClientConfig{
-		User: d.GetSSHUsername(),
-		Auth: []ssh.AuthMethod{
-			ssh.Password(d.GuestPassword)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}
-
-	sshbasedir := "/home/" + d.GetSSHUsername() + "/.ssh"
-	hostname, _ := d.GetSSHHostname()
-	port, _ := d.GetSSHPort()
-	clientstr := fmt.Sprintf("%s:%d", hostname, port)
-
-	d.debugf("Creating directory '%s'", sshbasedir)
-	conn, err := ssh.Dial("tcp", clientstr, sshConfig)
-	if err != nil {
-		return err
-	}
-	session, err := conn.NewSession()
-	if err != nil {
-		return err
-	}
-
-	var stdoutBuf bytes.Buffer
-	session.Stdout = &stdoutBuf
-	session.Run("mkdir -p " + sshbasedir)
-	d.debugf(fmt.Sprintf("%s -> %s", hostname, stdoutBuf.String()))
-	session.Close()
-
-	d.debugf("Trying to copy to %s:%s", clientstr, sshbasedir)
-	c, err := sshrw.NewSSHclt(clientstr, sshConfig)
-	if err != nil {
-		return err
-	}
-
-	// Open a file
-	f, err := os.Open(d.GetSSHKeyPath() + ".pub")
-	if err != nil {
-		return err
-	}
-
-	// TODO: always fails with return status 127, but file was copied correclty
-	c.WriteFile(f, sshbasedir+"/authorized_keys")
-	// if err = c.WriteFile(f, sshbasedir+"/authorized_keys"); err != nil {
-	// 	d.debugf("Error on file write: ", err)
-	// }
-
-	// Close the file after it has been copied
-	defer f.Close()
-
-	return err
 }
 
 // Start starts the VM
@@ -1189,6 +976,10 @@ func (d *Driver) Remove() error {
 		return nil
 	}
 
+	ip, err := d.GetIP()
+	if err != nil {
+		return err
+	}
 	// force shut down VM before invoking delete
 	err = d.Kill()
 	if err != nil {
@@ -1201,7 +992,11 @@ func (d *Driver) Remove() error {
 	}
 
 	err = d.driver.WaitForTaskToComplete(d.Node, taskid)
-	return err
+	if err != nil {
+		return err
+	}
+	return dns.DeleteRecord(ip, d.MachineName, d.HostedZone, 60, 100, d.AWSRegion)
+
 }
 
 // Upgrade is currently a NOOP
