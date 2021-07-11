@@ -414,6 +414,7 @@ type NodesNodeQemuVMIDClonePostParameter struct {
 	Full    string // Create a full copy of all disks.
 	Storage string // Target storage for full clone.
 	Format  string // Target format for file storage. Only valid for full clone.
+	Target  string
 }
 
 // NodesNodeQemuVMIDClonePost access the API
@@ -781,8 +782,7 @@ func (p ProxmoxVE) WaitForTaskToComplete(node string, taskid string) error {
 			log.Infof("exiting with %s", tsr.Exitstatus)
 			return nil
 		}
-		log.Info("still running, waiting 500ms")
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(10 * time.Second)
 	}
 	// unreachable code
 	return nil
